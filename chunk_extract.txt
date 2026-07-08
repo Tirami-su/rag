@@ -1,0 +1,101 @@
+"""Markdown 解析器（本地实现，不依赖 unstructured / nltk）。
+
+用 markdown 库把 .md 渲染成 HTML，再用标准库 html.parser 建树，
+按标题层级为每个正文块构建 hierarchy_path。
+"""
+
+import json
+import os
+from html.parser import HTMLParser
+from typing import Any, Dict, List
+
+import markdown
+
+
+class _Node:
+    __slots__ = ("tag", "children")
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+        self.children: List[Any] = []
+
+    def text(self) -> str:
+        return "".join(c if isinstance(c, str) else c.text() for c in self.children)
+
+
+_VOID = {"br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr"}
+_HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+_BODIES = {"p", "li"}
+
+
+class _TreeBuilder(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = _Node("root")
+        self._stack: List[_Node] = [self.root]
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        node = _Node(tag)
+        self._stack[-1].children.append(node)
+        if tag not in _VOID:
+            self._stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self._stack[-1].children.append(_Node(tag))
+
+    def handle_endtag(self, tag: str) -> None:
+        for i in range(len(self._stack) - 1, 0, -1):
+            if self._stack[i].tag == tag:
+                del self._stack[i:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        self._stack[-1].children.append(data)
+
+
+def _walk(node: _Node, headers: Dict[int, str], filename: str) -> List[Dict[str, Any]]:
+    """遍历 HTML 树：标题更新层级栈，正文直接产出带 hierarchy_path 的结果。"""
+    results: List[Dict[str, Any]] = []
+    for child in node.children:
+        if not isinstance(child, _Node):
+            continue
+        if child.tag in _HEADINGS:
+            level = int(child.tag[1])
+            text = child.text().strip()
+            if text:
+                # 清掉同级及更深层旧标题，再压入当前层级
+                headers = {k: v for k, v in headers.items() if k < level} | {level: text}
+        elif child.tag in _BODIES:
+            content = child.text().replace("\n", " ").strip()
+            if content:
+                results.append(
+                    {
+                        "content": content,
+                        "path": [v for _, v in sorted(headers.items())],
+                    }
+                )
+        else:
+            results.extend(_walk(child, headers, filename))
+    return results
+
+
+def parse_markdown_with_hierarchy(file_path: str) -> List[Dict[str, Any]]:
+    """解析 Markdown，返回带层级路径的正文块列表。"""
+    with open(file_path, "r", encoding="utf-8") as f:
+        html = markdown.markdown(f.read())
+    builder = _TreeBuilder()
+    builder.feed(html)
+    return _walk(builder.root, {}, os.path.basename(file_path))
+
+
+if __name__ == "__main__":
+    file = "dataset/doc3.md"
+
+    chunks = parse_markdown_with_hierarchy(file)
+
+    print(f"解析完成，共 {len(chunks)} 个块。\n")
+    for i, chunk in enumerate(chunks):
+        print(f"{i} {chunk['path']}")
+
+    with open(file[:-2] + "json", "w", encoding="utf-8") as f:
+        json.dump({"chunks": chunks, "category": "技术"}, f, ensure_ascii=False, indent=2)
