@@ -38,7 +38,7 @@ tools: List[ChatCompletionToolParam] = [
     }
 ]
 
-system_prompt = """
+system_prompt = f"""
 你是一个企业的智能助手。你可以使用 `{func_name}` 工具来查询企业内部知识库。
 
 ## 工具调用准则
